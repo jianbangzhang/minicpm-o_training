@@ -13,7 +13,6 @@ import torch
 import torch.distributed as dist
 import yaml
 
-# 项目根目录
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.modeling_minicpmo import MiniCPMOConfig, MiniCPMOModel
@@ -193,7 +192,7 @@ def run_stage3(cfg: dict, local_rank: int, world_size: int):
     device = torch.device(f"cuda:{local_rank}")
     model_config = MiniCPMOConfig()
     model = MiniCPMOModel.from_pretrained_components(model_config).to(device)
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.get("llm", "Qwen/Qwen3-8B"))
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
@@ -264,7 +263,7 @@ def run_stage4(cfg: dict, local_rank: int, world_size: int):
     for p in ref_model.parameters():
         p.requires_grad_(False)
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.get("llm", "Qwen/Qwen3-8B"))
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})

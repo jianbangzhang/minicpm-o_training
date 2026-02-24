@@ -33,28 +33,28 @@ from transformers.modeling_outputs import ModelOutput
 class MiniCPMOConfig:
     """MiniCPM-o 4.5 统一配置"""
     # 视觉
-    vision_encoder_name: str = "google/siglip2-so400m-patch14-384"
+    vision_encoder_name: str = "raw/models/siglip2-so400m-patch14-384"
     vision_hidden_size: int = 1152          # SigLip2 输出维度
     vision_max_pixels: int = 1_800_000     # 最大 1.8M 像素
     vision_slice_mode: str = "llava_uhd"   # 高分辨率切片策略
     vision_token_compression: int = 4      # 视觉 token 压缩倍率
 
     # 语音
-    audio_encoder_name: str = "openai/whisper-medium"
+    audio_encoder_name: str = "raw/models/whisper-medium"
     audio_hidden_size: int = 1024          # Whisper-medium 输出维度
     audio_resampler_tokens: int = 128      # Perceiver 压缩后 token 数
     audio_sample_rate: int = 16000
     audio_chunk_size_ms: int = 640         # 全双工时每帧 640ms
 
     # 语言模型
-    llm_name: str = "Qwen/Qwen3-8B"
+    llm_name: str = "raw/models/qwen3"
     llm_hidden_size: int = 4096
     llm_max_length: int = 32768
     think_token: str = "<think>"
     end_think_token: str = "</think>"
 
     # TTS (CosyVoice2)
-    tts_model_name: str = "FunAudioLLM/CosyVoice2-0.5B"
+    tts_model_name: str = "raw/models/cosyvoice2"
     speech_token_size: int = 6561          # CosyVoice2 speech token vocab
 
     # 视频

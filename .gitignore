@@ -8,6 +8,7 @@ temp/
 raw/models/qwen3
 raw/models/siglip2-so400m-patch14-384
 raw/models/whisper-medium
+raw/models/cosyvoice2
 
 __pycache__/
 *.pyc
