@@ -20,7 +20,6 @@ checkpoints/stage2
 checkpoints/stage3
 checkpoints/stage4
 
-raw/datasets/stage1
-raw/datasets/stage2
-raw/datasets/stage3
-raw/datasets/stage4
+build_data/audio_text
+build_data/image_text
+build_data/ocr_data

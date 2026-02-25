@@ -3,3 +3,4 @@ decord
 torch
 torchaudio
 torchvision
+yt-dlp

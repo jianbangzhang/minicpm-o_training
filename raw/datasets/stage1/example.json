@@ -1,0 +1,12 @@
+[
+    {
+        "type": "image_text",
+        "image": "/path/to/image.jpg",
+        "text": "图像描述文字"
+    },
+    {
+        "type": "audio_text",
+        "audio": "/path/to/audio.wav",
+        "transcript": "语音转录文本"
+    }
+]

@@ -1,0 +1,33 @@
+[
+  {
+        "type": "audio_text",
+        "audio": "/path/to/audio.wav",
+        "transcript": "语音转录文本"
+  },
+  {
+        "type": "image_text",
+        "image": "/path/to/image.jpg",
+        "text": "图像描述文字"
+  },
+  {
+        "type": "ocr_document",
+        "image": "/path/to/doc.png",
+        "ocr_text": "文档完整文字内容",
+        "text_boxes": [["x0","y0","x1","y1"]],
+        "noise_level": null
+  },
+  {
+        "type": "video",
+        "video": "/path/to/video.mp4",
+        "caption": "视频描述"
+  },
+  {
+        "type": "interleaved",
+        "items": [
+            {"type": "text", "content": "前置文字"},
+            {"type": "image", "path": "/path/img1.jpg"},
+            {"type": "text", "content": "图片间文字"},
+            {"type": "image", "path": "/path/img2.jpg"}
+        ]
+    }
+]

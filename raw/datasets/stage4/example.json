@@ -1,0 +1,23 @@
+[
+  {
+        "id": "math_001",
+        "task_type": "math  # \"math\" | \"code\" | \"choice\"",
+        "thinking_mode": "deep  # RLPR 主要用深思考模式",
+        "conversations": [
+            {"role": "user", "content": [
+                {"type": "image", "path": "..."},
+                {"type": "text", "content": "求解..."}
+            ]}
+        ],
+        "ground_truth": "42,# 可验证答案",
+        "test_cases": ["# 代码题测试用例（可选）"]
+  },
+  {
+        "id": "hallucination_001",
+        "image": "/path/to/image.jpg",
+        "question": "Describe the objects in the image.",
+        "chosen": "The image shows a red car parked on the street...# 准确回复",
+        "rejected": "The image shows a blue car flying in the sky... # 含幻觉的回复",
+        "thinking_mode": "fast"
+    }
+]

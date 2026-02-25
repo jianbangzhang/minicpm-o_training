@@ -1,0 +1,41 @@
+[
+  {
+    "id": "sample_001",
+    "type": "vision_qa",
+    "thinking_mode": "fast",
+    "conversations": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": [
+            {"type": "image", "path": "/path/to/img.jpg"},
+            {"type": "text", "content": "What is shown in this image?"}
+        ]},
+        {"role": "assistant", "content": "The image shows..."}
+    ]
+  },
+  {
+    "id": "sample_002",
+    "type": "vision_qa",
+    "thinking_mode": "deep",
+    "conversations": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": [
+            {"type": "image", "path": "/path/to/img.jpg"},
+            {"type": "text", "content": "What is shown in this image?"}
+        ]},
+        {"role": "assistant", "content": "The image shows...","think": "xxxx"}
+    ]
+  },
+  {
+    "id": "sample_003",
+    "type": "speech_dialog",
+    "thinking_mode": "deep",
+    "conversations": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": [
+            {"type": "audio", "path": "/path/to/audio"},
+            {"type": "text", "content": "What is shown in this image?"}
+        ]},
+        {"role": "assistant", "content": "The audio shows..."}
+    ]
+  }
+]

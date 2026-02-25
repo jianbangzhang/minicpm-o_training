@@ -1,0 +1,188 @@
+# ==========================================================
+# Stage 1: 模态对齐预训练配置
+# ==========================================================
+stage1:
+  # 模型
+  vision_encoder: "raw/models/siglip2-so400m-patch14-384"
+  audio_encoder: "raw/models/whisper-medium"
+  llm: "raw/models/qwen3"
+
+  # 训练
+  learning_rate: 2.0e-3         # Projector 从头训练，学习率高
+  weight_decay: 0.01
+  warmup_steps: 1000
+  max_steps: 50000
+  batch_size_per_gpu: 32
+  gradient_accumulation_steps: 16  # 有效 batch = 32*16=512 (8 GPU) → BS≈4096
+  max_grad_norm: 1.0
+  save_steps: 2000
+  log_steps: 50
+
+  # 数据配比
+  data:
+    image_text_ratio: 0.70       # LAION/CC/COCO 图文对
+    audio_text_ratio: 0.30       # WenetSpeech/LibriSpeech
+    image_text_paths:
+      - "raw/datasetsstage1/laion400m_subset.jsonl"
+      - "raw/datasetsstage1/cc3m.jsonl"
+      - "raw/datasetsstage1/coco_caption.jsonl"
+    audio_text_paths:
+      - "raw/datasetsstage1/wenetspeech.jsonl"
+      - "raw/datasetsstage1/librispeech.jsonl"
+      - "raw/datasetsstage1/aishell3.jsonl"
+
+  # 硬件
+  num_gpus: 8
+  gpu_type: "A100-80GB"
+  expected_days: 5
+  output_dir: "checkpoints/stage1"
+
+# ==========================================================
+# Stage 2: 统一多模态预训练配置
+# ==========================================================
+stage2:
+  # 接续 Stage 1 权重
+  projector_checkpoint: "checkpoints/stage1/checkpoint-final/projector.pt"
+
+  # 差异化学习率
+  encoder_lr: 1.0e-5
+  projector_lr: 5.0e-4
+  llm_lr: 1.0e-4
+  weight_decay: 0.1
+  warmup_steps: 2000
+  max_steps: 200000
+  batch_size_per_gpu: 4
+  gradient_accumulation_steps: 64  # 有效 BS ≈ 512
+
+  # OCR 噪声设置
+  ocr_noise:
+    apply_prob: 0.7
+    noise_level_range: [0, 5]
+    text_region_only_prob: 0.8
+
+  # 数据配比（通过 WeightedRandomSampler）
+  data:
+    type_weights:
+      interleaved: 0.35
+      ocr_document: 0.25
+      video: 0.20
+      audio_text: 0.20
+    paths:
+      interleaved:
+        - "raw/datasetsstage2/mint1t_subset.jsonl"
+        - "raw/datasetsstage2/omnicorpus_subset.jsonl"
+      ocr_document:
+        - "raw/datasetsstage2/arxiv_docs.jsonl"
+        - "raw/datasetsstage2/synthetic_docs.jsonl"
+        - "raw/datasetsstage2/omnidocbench.jsonl"
+      video:
+        - "raw/datasetsstage2/webvid10m.jsonl"
+        - "raw/datasetsstage2/activitynet.jsonl"
+        - "raw/datasetsstage2/ego4d.jsonl"
+      audio_text:
+        - "raw/datasetsstage2/wenetspeech_extended.jsonl"
+        - "raw/datasetsstage2/vggsound.jsonl"
+
+  # 序列长度
+  max_seq_len: 8192
+  image_max_pixels: 1800000
+  video_frames_per_chunk: 6
+  video_tokens_per_chunk: 64
+
+  # 硬件
+  num_gpus: 32
+  gpu_type: "A100-80GB"
+  expected_weeks: 3
+  output_dir: "checkpoints/stage2"
+
+# ==========================================================
+# Stage 3: 监督微调 (SFT) 配置
+# ==========================================================
+stage3:
+  pretrained_checkpoint: "checkpoints/stage2/checkpoint-final/model.pt"
+
+  # 超参
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  total_steps: 30000
+  batch_size_per_gpu: 2
+  gradient_accumulation_steps: 128  # 有效 BS ≈ 512 (16 GPU)
+  max_grad_norm: 1.0
+  save_steps: 1000
+  log_steps: 50
+
+  # 思考模式配比
+  fast_think_ratio: 0.70     # 70% 快思考样本
+  deep_think_ratio: 0.30     # 30% 深思考样本
+
+  # 两阶段数据调度
+  part1_ratio: 0.60          # 前 60% 步用 Part-1 数据
+  part2_ratio: 0.30          # 60~90% 步用 Part-2 数据
+  # final 10%: 最高质量精标数据
+
+  data:
+    part1:                   # 基础感知，短回复
+      - "raw/datasetssft/vision_qa_500k.jsonl"
+      - "raw/datasetssft/ocr_doc_200k.jsonl"
+      - "raw/datasetssft/speech_dialog_basic_100k.jsonl"
+    part2:                   # 复杂交互，长回复
+      - "raw/datasetssft/math_reasoning_300k.jsonl"
+      - "raw/datasetssft/video_qa_200k.jsonl"
+      - "raw/datasetssft/speech_dialog_advanced_200k.jsonl"
+      - "raw/datasetssft/long_response_100k.jsonl"
+      - "raw/datasetssft/multilingual_90k.jsonl"
+    final:                   # 高质量精标（最后 10%）
+      - "raw/datasetssft/high_quality_100k.jsonl"
+
+  # LoRA 配置（可选替代全参数微调）
+  use_lora: false
+  lora_rank: 64
+  lora_alpha: 128
+
+  # 硬件
+  num_gpus: 16
+  gpu_type: "A100-80GB"
+  expected_weeks: 2
+  output_dir: "checkpoints/stage3"
+
+# ==========================================================
+# Stage 4: 强化学习后训练配置
+# ==========================================================
+stage4:
+  sft_checkpoint: "checkpoints/stage3/sft-checkpoint-final/model.pt"
+
+  # GRPO 超参（RLPR）
+  grpo_lr: 5.0e-7
+  num_samples_per_prompt: 8    # G
+  clip_epsilon: 0.2
+  kl_coeff: 0.04               # β
+
+  # DPO 超参（RLAIF-V）
+  dpo_lr: 5.0e-7
+  dpo_beta: 0.1
+
+  # 训练调度
+  total_rl_steps: 3000
+  grpo_dpo_ratio: 0.50         # 50% GRPO, 50% DPO
+  grpo_batch_size: 4           # prompts per GRPO step
+  dpo_batch_size: 8
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  save_steps: 500
+  log_steps: 20
+
+  # 数据
+  data:
+    rlpr:                      # 可验证推理数据
+      - "raw/datasetsrl/math_geoqa_300k.jsonl"
+      - "raw/datasetsrl/mathvista_train.jsonl"
+      - "raw/datasetsrl/code_reasoning_100k.jsonl"
+    rlaifv:                    # AI 反馈偏好数据
+      - "raw/datasetsrl/rlaifv_preference_200k.jsonl"
+
+  # 硬件
+  num_gpus: 16
+  gpu_type: "A100-80GB"
+  expected_days: 7
+  output_dir: "checkpoints/stage4"
