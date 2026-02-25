@@ -15,7 +15,10 @@ __pycache__/
 
 .DS_Store
 
-checkpoints
+checkpoints/stage1
+checkpoints/stage2
+checkpoints/stage3
+checkpoints/stage4
 
 raw/datasets/stage1
 raw/datasets/stage2

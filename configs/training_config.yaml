@@ -23,13 +23,13 @@ stage1:
     image_text_ratio: 0.70       # LAION/CC/COCO 图文对
     audio_text_ratio: 0.30       # WenetSpeech/LibriSpeech
     image_text_paths:
-      - "data/stage1/laion400m_subset.jsonl"
-      - "data/stage1/cc3m.jsonl"
-      - "data/stage1/coco_caption.jsonl"
+      - "raw/datasetsstage1/laion400m_subset.jsonl"
+      - "raw/datasetsstage1/cc3m.jsonl"
+      - "raw/datasetsstage1/coco_caption.jsonl"
     audio_text_paths:
-      - "data/stage1/wenetspeech.jsonl"
-      - "data/stage1/librispeech.jsonl"
-      - "data/stage1/aishell3.jsonl"
+      - "raw/datasetsstage1/wenetspeech.jsonl"
+      - "raw/datasetsstage1/librispeech.jsonl"
+      - "raw/datasetsstage1/aishell3.jsonl"
 
   # 硬件
   num_gpus: 8
@@ -69,19 +69,19 @@ stage2:
       audio_text: 0.20
     paths:
       interleaved:
-        - "data/stage2/mint1t_subset.jsonl"
-        - "data/stage2/omnicorpus_subset.jsonl"
+        - "raw/datasetsstage2/mint1t_subset.jsonl"
+        - "raw/datasetsstage2/omnicorpus_subset.jsonl"
       ocr_document:
-        - "data/stage2/arxiv_docs.jsonl"
-        - "data/stage2/synthetic_docs.jsonl"
-        - "data/stage2/omnidocbench.jsonl"
+        - "raw/datasetsstage2/arxiv_docs.jsonl"
+        - "raw/datasetsstage2/synthetic_docs.jsonl"
+        - "raw/datasetsstage2/omnidocbench.jsonl"
       video:
-        - "data/stage2/webvid10m.jsonl"
-        - "data/stage2/activitynet.jsonl"
-        - "data/stage2/ego4d.jsonl"
+        - "raw/datasetsstage2/webvid10m.jsonl"
+        - "raw/datasetsstage2/activitynet.jsonl"
+        - "raw/datasetsstage2/ego4d.jsonl"
       audio_text:
-        - "data/stage2/wenetspeech_extended.jsonl"
-        - "data/stage2/vggsound.jsonl"
+        - "raw/datasetsstage2/wenetspeech_extended.jsonl"
+        - "raw/datasetsstage2/vggsound.jsonl"
 
   # 序列长度
   max_seq_len: 8192
@@ -123,17 +123,17 @@ stage3:
 
   data:
     part1:                   # 基础感知，短回复
-      - "data/sft/vision_qa_500k.jsonl"
-      - "data/sft/ocr_doc_200k.jsonl"
-      - "data/sft/speech_dialog_basic_100k.jsonl"
+      - "raw/datasetssft/vision_qa_500k.jsonl"
+      - "raw/datasetssft/ocr_doc_200k.jsonl"
+      - "raw/datasetssft/speech_dialog_basic_100k.jsonl"
     part2:                   # 复杂交互，长回复
-      - "data/sft/math_reasoning_300k.jsonl"
-      - "data/sft/video_qa_200k.jsonl"
-      - "data/sft/speech_dialog_advanced_200k.jsonl"
-      - "data/sft/long_response_100k.jsonl"
-      - "data/sft/multilingual_90k.jsonl"
+      - "raw/datasetssft/math_reasoning_300k.jsonl"
+      - "raw/datasetssft/video_qa_200k.jsonl"
+      - "raw/datasetssft/speech_dialog_advanced_200k.jsonl"
+      - "raw/datasetssft/long_response_100k.jsonl"
+      - "raw/datasetssft/multilingual_90k.jsonl"
     final:                   # 高质量精标（最后 10%）
-      - "data/sft/high_quality_100k.jsonl"
+      - "raw/datasetssft/high_quality_100k.jsonl"
 
   # LoRA 配置（可选替代全参数微调）
   use_lora: false
@@ -175,11 +175,11 @@ stage4:
   # 数据
   data:
     rlpr:                      # 可验证推理数据
-      - "data/rl/math_geoqa_300k.jsonl"
-      - "data/rl/mathvista_train.jsonl"
-      - "data/rl/code_reasoning_100k.jsonl"
+      - "raw/datasetsrl/math_geoqa_300k.jsonl"
+      - "raw/datasetsrl/mathvista_train.jsonl"
+      - "raw/datasetsrl/code_reasoning_100k.jsonl"
     rlaifv:                    # AI 反馈偏好数据
-      - "data/rl/rlaifv_preference_200k.jsonl"
+      - "raw/datasetsrl/rlaifv_preference_200k.jsonl"
 
   # 硬件
   num_gpus: 16

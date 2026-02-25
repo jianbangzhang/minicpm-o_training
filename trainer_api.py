@@ -87,7 +87,7 @@ def run_stage1(cfg: dict, local_rank: int, world_size: int):
     valid_paths = [p for p in all_paths if Path(p).exists()]
     if not valid_paths:
         print("[Warning] 未找到数据文件，使用示例路径（请替换为真实数据）")
-        valid_paths = ["/data/stage1/example.jsonl"]
+        valid_paths = ["raw/stage1/example.jsonl"]
 
     dataset = Stage1AlignmentDataset(
         data_paths=valid_paths,
