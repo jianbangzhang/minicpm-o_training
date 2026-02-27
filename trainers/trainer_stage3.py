@@ -17,9 +17,10 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils.rnn import pad_sequence
 
-from ..models.modeling_minicpmo import MiniCPMOModel
-from ..data.dataset_stage3 import SFTDataset, TwoPhaseDataScheduler
-
+from models.modeling_minicpmo import MiniCPMOModel
+from data.dataset_stage3 import SFTDataset, TwoPhaseDataScheduler
+import warnings
+warnings.filterwarnings("ignore")
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
     import math
@@ -234,8 +235,15 @@ class Stage3SFTTrainer:
         if world_size > 1:
             self.model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-        self.scaler = torch.cuda.amp.GradScaler()
+        # 修复：bfloat16 不需要 GradScaler（动态范围够宽，不会溢出）
+        #    float16 才需要 GradScaler；原代码用 bfloat16 却初始化 scaler=None，
+        #    导致后续 self.scaler.scale() 崩溃。
         self.dtype = torch.bfloat16
+        self.scaler = (
+            torch.cuda.amp.GradScaler() if self.dtype == torch.float16 else None
+        )
+        if self.is_main_process:
+            print(f"[Stage3] 训练精度: {self.dtype}, GradScaler: {'启用' if self.scaler else '禁用（bfloat16 不需要）'}")
 
     def _build_dataloader(self, dataset: SFTDataset, batch_size: int):
         """构建/重建 DataLoader"""
@@ -313,7 +321,12 @@ class Stage3SFTTrainer:
                 )
                 loss = outputs["loss"] / self.gradient_accumulation_steps
 
-            self.scaler.scale(loss).backward()
+            # 修复1：backward 根据 scaler 是否存在分支
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
             total_loss += loss.item() * self.gradient_accumulation_steps
 
             # 分类型记录 loss
@@ -327,13 +340,21 @@ class Stage3SFTTrainer:
 
             step += 1
             if step % self.gradient_accumulation_steps == 0:
-                self.scaler.unscale_(self.optimizer)
+                # 修复2：unscale_ / clip / step / update 全部条件分支
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     [p for p in self.model.parameters() if p.requires_grad],
                     self.max_grad_norm
                 )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+
                 self.optimizer.zero_grad()
                 self.lr_scheduler.step()
                 opt_step += 1

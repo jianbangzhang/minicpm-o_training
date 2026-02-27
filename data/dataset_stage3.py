@@ -35,8 +35,9 @@ from PIL import Image
 from torch.utils.data import ConcatDataset, Dataset
 from transformers import PreTrainedTokenizer
 
-from ..utils.video_audio_processor import AudioProcessor, VideoFrameProcessor
-
+from utils.video_audio_processor import AudioProcessor, VideoFrameProcessor
+import warnings
+warnings.filterwarnings("ignore")
 
 class ThinkingMode(Enum):
     FAST = "fast"
@@ -105,14 +106,21 @@ class SFTDataset(Dataset):
         allowed_types = self.phase_type_filter.get(self.phase)
         all_samples = []
         for path in data_paths:
-            with open(path, "r") as f:
-                for line in f:
-                    try:
-                        sample = json.loads(line.strip())
-                        if allowed_types is None or sample.get("type") in allowed_types:
-                            all_samples.append(sample)
-                    except json.JSONDecodeError:
-                        continue
+            if "jsonl" in path:
+                with open(path, "r",encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            sample = json.loads(line.strip())
+                            if allowed_types is None or sample.get("type") in allowed_types:
+                                all_samples.append(sample)
+                        except json.JSONDecodeError:
+                            continue
+            else:
+                with open(path, "r", encoding="utf-8") as f:
+                    sample = json.load(f)
+                    if isinstance(sample,dict) and "annotations" in sample:
+                        sample = sample["annotations"]
+                    all_samples.extend(sample)
         return all_samples
 
     def _log_type_distribution(self):
@@ -336,7 +344,7 @@ class SFTDataset(Dataset):
             return result
 
         except Exception as e:
-            print(f"[Warning] SFT 跳过损坏样本 idx={idx}: {e}")
+            #print(f"[Warning] SFT 跳过损坏样本 idx={idx}: {e}")
             return self.__getitem__((idx + 1) % len(self))
 
 
@@ -386,3 +394,4 @@ class TwoPhaseDataScheduler:
         elif current_step < self.boundaries["part2"]:
             return "part2"
         return "final"
+

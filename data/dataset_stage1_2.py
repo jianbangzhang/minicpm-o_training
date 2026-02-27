@@ -24,8 +24,8 @@ from PIL import Image
 from torch.utils.data import Dataset, WeightedRandomSampler
 from transformers import PreTrainedTokenizer
 
-from ..utils.ocr_noise import DynamicOCRNoise, get_noise_system_prompt
-from ..utils.video_audio_processor import AudioProcessor, VideoFrameProcessor
+from utils.ocr_noise import DynamicOCRNoise, get_noise_system_prompt
+from utils.video_audio_processor import AudioProcessor, VideoFrameProcessor
 
 
 # ============================================================
@@ -122,13 +122,23 @@ class Stage1AlignmentDataset(Dataset):
         self.audio_end_id = tokenizer.convert_tokens_to_ids(audio_end_token)
 
         # 加载所有数据元信息（只读路径，不预加载图像）
+        print("参与训练的数据集=================>",data_paths)
         self.samples = []
         for path in data_paths:
-            with open(path, "r") as f:
-                for line in f:
-                    sample = json.loads(line.strip())
-                    self.samples.append(sample)
-
+            if 'jsonl' in path:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        sample = json.loads(line)
+                        self.samples.append(sample)
+            else:
+                with open(path, "r", encoding="utf-8") as f:
+                    sample_data = json.load(f)
+                    if isinstance(sample_data, dict) and "annotations" in sample_data:
+                        sample_data = sample_data["annotations"]
+                        self.samples.extend(sample_data)
         print(f"[Stage1Dataset] 加载 {len(self.samples)} 条样本")
 
     def __len__(self) -> int:
@@ -139,9 +149,10 @@ class Stage1AlignmentDataset(Dataset):
         img = Image.open(image_path).convert("RGB")
         # 简单 resize（Stage 1 不做切片，Stage 2 再引入 LLaVA-UHD）
         img = img.resize((self.image_size, self.image_size), Image.BICUBIC)
-        img_np = torch.tensor(
+        img_np_ = torch.tensor(
             (torch.tensor(list(img.getdata())).view(self.image_size, self.image_size, 3).float() / 255.0 - 0.5) / 0.5
         ).permute(2, 0, 1)
+        img_np = img_np_.clone().detach()
         return img_np
 
     def _build_image_text_sample(self, sample: Dict) -> Dict[str, Any]:
@@ -242,6 +253,8 @@ class Stage1AlignmentDataset(Dataset):
 # Stage 2: 统一多模态预训练数据集
 # ============================================================
 
+
+
 class Stage2MultimodalDataset(Dataset):
     """
     Stage 2 统一多模态预训练数据集。
@@ -284,16 +297,31 @@ class Stage2MultimodalDataset(Dataset):
         # 加载所有类型数据
         self.samples_by_type: Dict[str, List[Dict]] = {}
         self.all_samples: List[Tuple[str, int]] = []  # (type, index)
-
         for data_type, paths in data_paths.items():
             samples = []
             for path in paths:
                 with open(path, "r") as f:
-                    for line in f:
+                    content = f.read().strip()
+                # 先尝试整体解析（JSON 数组 / 单个 JSON 对象）
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, list):
+                        samples.extend([d for d in data if isinstance(d, dict)])
+                    elif isinstance(data, dict) and "annotations" in data:
+                        data = data["annotations"]
+                        samples.extend([d for d in data if isinstance(d, dict)])
+                except json.JSONDecodeError:
+                    for line in content.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
                         try:
-                            samples.append(json.loads(line.strip()))
+                            obj = json.loads(line)
+                            if isinstance(obj, dict):
+                                samples.append(obj)
                         except json.JSONDecodeError:
                             continue
+
             self.samples_by_type[data_type] = samples
             for i in range(len(samples)):
                 self.all_samples.append((data_type, i))
@@ -329,8 +357,9 @@ class Stage2MultimodalDataset(Dataset):
           - 高噪声(3~5): 内容理解/补全任务
         """
         image = Image.open(sample["image"]).convert("RGB")
+        raw_level = sample.get("noise_level", None)
+        fixed_level = None if (raw_level is None or str(raw_level).lower() == "null") else raw_level
         text_boxes = sample.get("text_boxes", None)
-        fixed_level = sample.get("noise_level", None)
 
         # 施加动态噪声
         noisy_image, actual_level = self.ocr_noiser.apply(
@@ -545,3 +574,4 @@ class Stage2MultimodalDataset(Dataset):
         except Exception as e:
             print(f"[Warning] Stage2 跳过损坏样本 idx={idx} type={data_type}: {e}")
             return self.__getitem__((idx + 1) % len(self))
+

@@ -23,53 +23,76 @@ from transformers import (
     Qwen2Config,
 )
 from transformers.modeling_outputs import ModelOutput
-
+from transformers import SiglipVisionModel
+from transformers import PretrainedConfig
 
 # ============================================================
 # 配置类
 # ============================================================
 
-@dataclass
-class MiniCPMOConfig:
-    """MiniCPM-o 4.5 统一配置"""
-    # 视觉
-    vision_encoder_name: str = "raw/models/siglip2-so400m-patch14-384"
-    vision_hidden_size: int = 1152          # SigLip2 输出维度
-    vision_max_pixels: int = 1_800_000     # 最大 1.8M 像素
-    vision_slice_mode: str = "llava_uhd"   # 高分辨率切片策略
-    vision_token_compression: int = 4      # 视觉 token 压缩倍率
+class MiniCPMOConfig(PretrainedConfig):
+    model_type = "minicpmo"
 
-    # 语音
-    audio_encoder_name: str = "raw/models/whisper-medium"
-    audio_hidden_size: int = 1024          # Whisper-medium 输出维度
-    audio_resampler_tokens: int = 128      # Perceiver 压缩后 token 数
-    audio_sample_rate: int = 16000
-    audio_chunk_size_ms: int = 640         # 全双工时每帧 640ms
-
-    # 语言模型
-    llm_name: str = "raw/models/qwen3"
-    llm_hidden_size: int = 4096
-    llm_max_length: int = 32768
-    think_token: str = "<think>"
-    end_think_token: str = "</think>"
-
-    # TTS (CosyVoice2)
-    tts_model_name: str = "raw/models/cosyvoice2"
-    speech_token_size: int = 6561          # CosyVoice2 speech token vocab
-
-    # 视频
-    video_frames_per_chunk: int = 6        # 每 6 帧联合压缩
-    video_tokens_per_chunk: int = 64       # 压缩后 64 tokens
-    video_max_frames: int = 96
-
-    # Projector
-    projector_type: str = "mlp"           # 视觉侧 MLP
-    projector_hidden_size: int = 4096
-
-    # 训练
-    use_flash_attention: bool = True
-    dtype: str = "bfloat16"
-
+    def __init__(
+        self,
+        # 视觉
+        vision_encoder_name: str = "raw/models/siglip2-so400m-patch14-384",
+        vision_hidden_size: int = 1152,
+        vision_max_pixels: int = 1_800_000,
+        vision_slice_mode: str = "llava_uhd",
+        vision_token_compression: int = 4,
+        # 语音
+        audio_encoder_name: str = "raw/models/whisper-medium",
+        audio_hidden_size: int = 1024,
+        audio_resampler_tokens: int = 128,
+        audio_sample_rate: int = 16000,
+        audio_chunk_size_ms: int = 640,
+        # 语言模型
+        llm_name: str = "raw/models/qwen3",
+        llm_hidden_size: int = 4096,
+        llm_max_length: int = 32768,
+        think_token: str = "<think>",
+        end_think_token: str = "</think>",
+        # TTS
+        tts_model_name: str = "raw/models/cosyvoice2",
+        speech_token_size: int = 6561,
+        # 视频
+        video_frames_per_chunk: int = 6,
+        video_tokens_per_chunk: int = 64,
+        video_max_frames: int = 96,
+        # Projector
+        projector_type: str = "mlp",
+        projector_hidden_size: int = 4096,
+        # 训练
+        use_flash_attention: bool = False,
+        dtype: str = "bfloat16",
+        **kwargs,  # 必须有，传给 PretrainedConfig
+    ):
+        super().__init__(**kwargs)  # 先调父类
+        self.vision_encoder_name = vision_encoder_name
+        self.vision_hidden_size = vision_hidden_size
+        self.vision_max_pixels = vision_max_pixels
+        self.vision_slice_mode = vision_slice_mode
+        self.vision_token_compression = vision_token_compression
+        self.audio_encoder_name = audio_encoder_name
+        self.audio_hidden_size = audio_hidden_size
+        self.audio_resampler_tokens = audio_resampler_tokens
+        self.audio_sample_rate = audio_sample_rate
+        self.audio_chunk_size_ms = audio_chunk_size_ms
+        self.llm_name = llm_name
+        self.llm_hidden_size = llm_hidden_size
+        self.llm_max_length = llm_max_length
+        self.think_token = think_token
+        self.end_think_token = end_think_token
+        self.tts_model_name = tts_model_name
+        self.speech_token_size = speech_token_size
+        self.video_frames_per_chunk = video_frames_per_chunk
+        self.video_tokens_per_chunk = video_tokens_per_chunk
+        self.video_max_frames = video_max_frames
+        self.projector_type = projector_type
+        self.projector_hidden_size = projector_hidden_size
+        self.use_flash_attention = use_flash_attention
+        self.dtype = dtype
 
 # ============================================================
 # 视觉模块
@@ -322,26 +345,52 @@ class MiniCPMOModel(PreTrainedModel):
         model = cls(config)
 
         if init_vision:
-            print(f"[Init] 加载视觉编码器: {config.vision_encoder_name}")
-            model.vision_encoder = AutoModel.from_pretrained(
+            print(f"\t[Init] 加载视觉编码器: {config.vision_encoder_name}")
+            model.vision_encoder = SiglipVisionModel.from_pretrained(
                 config.vision_encoder_name, torch_dtype=dtype
             )
 
         if init_audio:
-            print(f"[Init] 加载语音编码器: {config.audio_encoder_name}")
+            print(f"\t[Init] 加载语音编码器: {config.audio_encoder_name}")
             model.audio_encoder = WhisperModel.from_pretrained(
                 config.audio_encoder_name, torch_dtype=dtype
             ).encoder
 
-        if init_tts:
-            print(f"[Init] 加载语音解码器: {config.audio_encoder_name}")
 
-        print(f"[Init] 加载语言模型: {config.llm_name}")
+        print(f"\t[Init] 加载语言模型: {config.llm_name}")
         model.llm = AutoModelForCausalLM.from_pretrained(
             config.llm_name,
             torch_dtype=dtype,
             attn_implementation="flash_attention_2" if config.use_flash_attention else "sdpa",
         )
+
+        # 加载完 LLM 后，用实际 hidden_size 重建 projector ← 加这里
+        actual_hidden_size = model.llm.config.hidden_size
+        print(f"\t[Init] LLM hidden_size: {actual_hidden_size}")
+
+        model.vision_projector = VisionProjector(
+            in_dim=config.vision_hidden_size,
+            out_dim=actual_hidden_size,  # 用实际值
+            compress=config.vision_token_compression,
+        ).to(dtype)
+
+        model.audio_resampler = AudioPerceiverResampler(
+            in_dim=config.audio_hidden_size,
+            out_dim=actual_hidden_size,
+            num_latents=config.audio_resampler_tokens,
+        ).to(dtype)
+
+        model.video_resampler = Video3DResampler(
+            in_dim=config.vision_hidden_size,
+            out_dim=actual_hidden_size,
+            frames_per_chunk=config.video_frames_per_chunk,
+            out_tokens=config.video_tokens_per_chunk,
+        ).to(dtype)
+
+        model.speech_lm_head = nn.Linear(
+            actual_hidden_size, config.speech_token_size, bias=False
+        ).to(dtype)
+
         return model.to(dtype)
 
     def encode_images(self, pixel_values: torch.Tensor,
@@ -352,10 +401,8 @@ class MiniCPMOModel(PreTrainedModel):
         返回: (B, num_visual_tokens, llm_hidden_size)
         """
         # SigLip2 编码
-        vision_outputs = self.vision_encoder(pixel_values=pixel_values)
-        # 取 patch token 特征 (去掉 CLS)
-        features = vision_outputs.last_hidden_state[:, 1:, :]  # (B, N_patch, 1152)
-
+        vision_outputs = self.vision_encoder(pixel_values=pixel_values,interpolate_pos_encoding=True)
+        features = vision_outputs.last_hidden_state
         # 切片合并（如果有多切片）
         if slice_coords is not None:
             features = self._merge_slices(features, slice_coords)
@@ -379,7 +426,7 @@ class MiniCPMOModel(PreTrainedModel):
             chunk = frame_pixel_values[:, i * chunk_size:(i + 1) * chunk_size]
             # 批量编码所有帧
             chunk_flat = chunk.view(B * chunk_size, C, H, W)
-            vision_out = self.vision_encoder(pixel_values=chunk_flat)
+            vision_out = self.vision_encoder(pixel_values=chunk_flat,interpolate_pos_encoding=True)
             feats = vision_out.last_hidden_state[:, 1:, :]  # (B*6, N, 1152)
             feats = feats.view(B, chunk_size, feats.shape[1], feats.shape[2])
             # 3D Resampler: 6帧 → 64 tokens
@@ -390,18 +437,20 @@ class MiniCPMOModel(PreTrainedModel):
 
     def encode_audio(self, audio_features: torch.Tensor,
                      audio_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        语音编码：Whisper encoder → Perceiver Resampler
-        audio_features: (B, 80, T) — mel spectrogram
-        返回: (B, 128, 4096)
-        """
         # Whisper 编码
         whisper_out = self.audio_encoder(audio_features)
         audio_hidden = whisper_out.last_hidden_state  # (B, T/2, 1024)
 
+        # ← 加这里：mask 同步下采样，对齐 Whisper encoder 输出长度
+        if audio_mask is not None:
+            # audio_mask: (B, T) → (B, T/2)，每两帧取一个
+            audio_mask = audio_mask[:, ::2]
+            # 防止长度不完全整除导致差1
+            audio_mask = audio_mask[:, :audio_hidden.shape[1]]
+
         # Perceiver 重采样到固定 128 tokens
         audio_tokens = self.audio_resampler(audio_hidden, audio_mask)
-        return audio_tokens  # (B, 128, 4096)
+        return audio_tokens
 
     def forward(
         self,
@@ -496,29 +545,34 @@ class MiniCPMOModel(PreTrainedModel):
         return total_loss, lm_logits, speech_logits
 
     def _replace_placeholder(
-        self, inputs_embeds, modal_tokens, input_ids, start_id, end_id
+            self, inputs_embeds, modal_tokens, input_ids, start_id, end_id
     ) -> torch.Tensor:
-        """
-        将 inputs_embeds 中 [start_id ... end_id] 区间的占位符
-        替换为实际的多模态 token 嵌入。
-        modal_tokens: (B, N_modal, hidden)
-        """
         B = inputs_embeds.shape[0]
         new_embeds = inputs_embeds.clone()
+
+        modal_idx = 0  # modal_tokens 的独立索引
 
         for b in range(B):
             ids = input_ids[b]
             start_pos = (ids == start_id).nonzero(as_tuple=True)[0]
             end_pos = (ids == end_id).nonzero(as_tuple=True)[0]
+
+            # 这个样本没有模态占位符，跳过
             if len(start_pos) == 0 or len(end_pos) == 0:
                 continue
-            # 假设单个模态区间（多区间需要迭代处理）
+
+            # modal_tokens 已经用完，防止越界
+            if modal_idx >= modal_tokens.shape[0]:
+                break
+
             s, e = start_pos[0].item() + 1, end_pos[0].item()
             slot_len = e - s
             tok_len = modal_tokens.shape[1]
-            # 如果 token 数不匹配，截断或填充
             actual_len = min(slot_len, tok_len)
-            new_embeds[b, s:s + actual_len] = modal_tokens[b, :actual_len]
+
+            new_embeds[b, s:s + actual_len] = modal_tokens[modal_idx, :actual_len]
+            modal_idx += 1  # ← 用独立索引，而不是 b
+
         return new_embeds
 
     def _merge_slices(self, features, slice_coords):
@@ -574,3 +628,4 @@ class MiniCPMOModel(PreTrainedModel):
             for p in self.speech_lm_head.parameters():
                 p.requires_grad = True
             return list(self.llm.parameters()) + list(self.speech_lm_head.parameters())
+

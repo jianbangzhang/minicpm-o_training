@@ -1,0 +1,28 @@
+[
+  {
+        "id": "math_001",
+        "task_type": "math",
+        "thinking_mode": "deep",
+        "conversations": [
+            {"role": "user", "content": [
+                {"type": "image", "path": "build_data/image_text/images/00000000.jpg"},
+                {"type": "text", "content": "How many cars in image?"}
+            ]}
+        ],
+        "ground_truth": "32",
+        "test_cases": []
+  },
+  {
+        "id": "math_002",
+        "task_type": "math",
+        "thinking_mode": "fast",
+        "conversations": [
+            {"role": "user", "content": [
+                {"type": "image", "path": "build_data/image_text/images/00000019.jpg"},
+                {"type": "text", "content": "How many people in image?"}
+            ]}
+        ],
+        "ground_truth": "12",
+        "test_cases": []
+  }
+]

@@ -19,6 +19,8 @@ from models.modeling_minicpmo import MiniCPMOConfig, MiniCPMOModel
 from utils.ocr_noise import DynamicOCRNoise
 from utils.video_audio_processor import AudioProcessor, VideoFrameProcessor
 
+import warnings
+warnings.filterwarnings("ignore")
 
 def setup_distributed():
     """初始化分布式训练环境"""
@@ -58,13 +60,16 @@ def run_stage1(cfg: dict, local_rank: int, world_size: int):
         llm_name=cfg["llm"],
     )
 
+    # 初始化 Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(cfg["llm"])
+    tokenizer.padding_side = 'left'
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     # 初始化模型
     model = MiniCPMOModel.from_pretrained_components(
         model_config, init_vision=True, init_audio=True
     ).to(device)
 
-    # 初始化 Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(cfg["llm"])
     # 添加特殊 token
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
@@ -76,10 +81,11 @@ def run_stage1(cfg: dict, local_rank: int, world_size: int):
     model._im_end_id = tokenizer.convert_tokens_to_ids("</image>")
     model._audio_start_id = tokenizer.convert_tokens_to_ids("<audio>")
     model._audio_end_id = tokenizer.convert_tokens_to_ids("</audio>")
+    model._video_start_id = tokenizer.convert_tokens_to_ids("<video>")
+    model._video_end_id = tokenizer.convert_tokens_to_ids("</video>")
 
     # 初始化处理器
     audio_processor = AudioProcessor(train_mode=True)
-
     # 数据集
     data_cfg = cfg["data"]
     all_paths = data_cfg.get("image_text_paths", []) + data_cfg.get("audio_text_paths", [])
@@ -87,7 +93,7 @@ def run_stage1(cfg: dict, local_rank: int, world_size: int):
     valid_paths = [p for p in all_paths if Path(p).exists()]
     if not valid_paths:
         print("[Warning] 未找到数据文件，使用示例路径（请替换为真实数据）")
-        valid_paths = ["raw/stage1/example.jsonl"]
+        raise FileExistsError
 
     dataset = Stage1AlignmentDataset(
         data_paths=valid_paths,
@@ -133,6 +139,15 @@ def run_stage2(cfg: dict, local_rank: int, world_size: int):
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+    model.llm.resize_token_embeddings(len(tokenizer))
+
+    # 设置特殊 token id
+    model._im_start_id = tokenizer.convert_tokens_to_ids("<image>")
+    model._im_end_id = tokenizer.convert_tokens_to_ids("</image>")
+    model._audio_start_id = tokenizer.convert_tokens_to_ids("<audio>")
+    model._audio_end_id = tokenizer.convert_tokens_to_ids("</audio>")
+    model._video_start_id = tokenizer.convert_tokens_to_ids("<video>")
+    model._video_end_id = tokenizer.convert_tokens_to_ids("</video>")
 
     audio_processor = AudioProcessor(train_mode=True)
     video_processor = VideoFrameProcessor(train_mode=True)
@@ -150,7 +165,7 @@ def run_stage2(cfg: dict, local_rank: int, world_size: int):
 
     if not data_paths:
         print("[Warning] 未找到 Stage2 数据，使用示例结构")
-        data_paths = {"interleaved": ["/data/stage2/example.jsonl"]}
+        raise FileExistsError
 
     dataset = Stage2MultimodalDataset(
         data_paths=data_paths,
@@ -196,6 +211,15 @@ def run_stage3(cfg: dict, local_rank: int, world_size: int):
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+    model.llm.resize_token_embeddings(len(tokenizer))
+
+    # 设置特殊 token id
+    model._im_start_id = tokenizer.convert_tokens_to_ids("<image>")
+    model._im_end_id = tokenizer.convert_tokens_to_ids("</image>")
+    model._audio_start_id = tokenizer.convert_tokens_to_ids("<audio>")
+    model._audio_end_id = tokenizer.convert_tokens_to_ids("</audio>")
+    model._video_start_id = tokenizer.convert_tokens_to_ids("<video>")
+    model._video_end_id = tokenizer.convert_tokens_to_ids("</video>")
 
     audio_processor = AudioProcessor(train_mode=True)
     video_processor = VideoFrameProcessor(train_mode=True)
@@ -203,7 +227,7 @@ def run_stage3(cfg: dict, local_rank: int, world_size: int):
     def make_dataset(data_paths, phase):
         valid_paths = [p for p in data_paths if Path(p).exists()]
         return SFTDataset(
-            data_paths=valid_paths if valid_paths else ["/data/sft/example.jsonl"],
+            data_paths=valid_paths,
             tokenizer=tokenizer,
             audio_processor=audio_processor,
             video_processor=video_processor,
@@ -252,32 +276,59 @@ def run_stage4(cfg: dict, local_rank: int, world_size: int):
     model_config = MiniCPMOConfig()
 
     # 策略模型（继续训练）
+    print("=========================初始化 policy model=========================")
     policy_model = MiniCPMOModel.from_pretrained_components(model_config).to(device)
-    sft_state = torch.load(cfg["sft_checkpoint"], map_location=device)
-    policy_model.load_state_dict(sft_state, strict=False)
 
     # 参考模型（冻结，保持 SFT 权重）
+    print("=========================初始化 referrence model=========================")
     ref_model = MiniCPMOModel.from_pretrained_components(model_config).to(device)
-    ref_model.load_state_dict(sft_state, strict=False)
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad_(False)
 
+    # 修复：先注册特殊 token 并 resize embeddings，再加载权重
     tokenizer = AutoTokenizer.from_pretrained(cfg.get("llm", "Qwen/Qwen3-8B"))
     special_tokens = ["<image>", "</image>", "<audio>", "</audio>",
                       "<video>", "</video>", "<think>", "</think>"]
     tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 
+    # resize 两个模型的 embedding，使 vocab size 与 checkpoint 一致
+    policy_model.llm.resize_token_embeddings(len(tokenizer))
+    ref_model.llm.resize_token_embeddings(len(tokenizer))
+
+    # 加载 SFT 权重（此时模型 vocab size 已与 checkpoint 对齐）
+    print("=========================加载Stage 3的训练模型权重到policy model和referrence model=========================")
+    sft_state = torch.load(cfg["sft_checkpoint"], map_location=device)
+    policy_model.load_state_dict(sft_state, strict=False)
+    ref_model.load_state_dict(sft_state, strict=False)
+
+    # 冻结参考模型
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad_(False)
+
+    special_token_ids = {
+        "_im_start_id":    tokenizer.convert_tokens_to_ids("<image>"),
+        "_im_end_id":      tokenizer.convert_tokens_to_ids("</image>"),
+        "_audio_start_id": tokenizer.convert_tokens_to_ids("<audio>"),
+        "_audio_end_id":   tokenizer.convert_tokens_to_ids("</audio>"),
+        "_video_start_id": tokenizer.convert_tokens_to_ids("<video>"),
+        "_video_end_id":   tokenizer.convert_tokens_to_ids("</video>"),
+    }
+    for model in [policy_model, ref_model]:
+        for attr, token_id in special_token_ids.items():
+            setattr(model, attr, token_id)
+
+    if local_rank == 0:
+        print(f"[Stage4] 特殊 token ids: { {k: v for k, v in special_token_ids.items()} }")
+
     # RL 数据集
-    rlpr_paths = [p for p in cfg["data"]["rlpr"] if Path(p).exists()]
+    rlpr_paths  = [p for p in cfg["data"]["rlpr"]   if Path(p).exists()]
     rlaifv_paths = [p for p in cfg["data"]["rlaifv"] if Path(p).exists()]
 
     rlpr_dataset = RLPRDataset(
-        data_paths=rlpr_paths if rlpr_paths else ["/data/rl/example_rlpr.jsonl"],
+        data_paths=rlpr_paths,
         tokenizer=tokenizer,
     )
     rlaifv_dataset = RLAIFVDataset(
-        data_paths=rlaifv_paths if rlaifv_paths else ["/data/rl/example_rlaifv.jsonl"],
+        data_paths=rlaifv_paths,
         tokenizer=tokenizer,
     )
 
@@ -304,9 +355,6 @@ def run_stage4(cfg: dict, local_rank: int, world_size: int):
     trainer.train()
 
 
-# ============================================================
-# 主入口
-# ============================================================
 
 def main():
     parser = argparse.ArgumentParser(description="MiniCPM-o 4.5 训练脚本")
@@ -346,3 +394,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

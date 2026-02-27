@@ -50,9 +50,11 @@ def download_file_with_progress(url, save_path=None):
                         pbar.update(len(chunk))
 
         print(f"\n下载完成: {save_path}")
+        return 1
 
     except Exception as e:
         print(f"下载失败: {e}")
+        return 0
 
 
 
@@ -72,14 +74,16 @@ def download_cc3m(output_dir):
             # 下载图像
             image_url = sample['image']
             image_path = f"{output_dir}/images/{idx:08d}.jpg"
-            download_file_with_progress(image_url,image_path)
-
-            annotations.append({
-                'image_id': f"{idx:08d}",
-                "type":"image_text",
-                'image': image_path,
-                'caption': sample['caption']
-            })
+            sucess=download_file_with_progress(image_url,image_path)
+            if sucess==1:
+                annotations.append({
+                    'image_id': f"{idx:08d}",
+                    "type":"image_text",
+                    'image': image_path,
+                    'caption': sample['caption']
+                })
+            else:
+                continue
 
         except Exception as e:
             print(f"Error downloading image {idx}: {e}")

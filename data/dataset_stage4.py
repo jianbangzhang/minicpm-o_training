@@ -16,7 +16,7 @@ Stage 4: 强化学习后训练数据集与奖励函数
   - 同一 batch 内混合两种模式数据
   - 共享策略网络，通过 system prompt 区分模式
 """
-
+import os.path
 import re
 import json
 import random
@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
+from PIL import Image
 
 
 # ============================================================
@@ -237,12 +238,23 @@ class RLPRDataset(Dataset):
 
         self.samples = []
         for path in data_paths:
-            with open(path, "r") as f:
-                for line in f:
-                    try:
-                        self.samples.append(json.loads(line.strip()))
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                if "jsonl" in path:
+                    with open(path, "r",encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                sample = json.loads(line.strip())
+                                self.samples.append(sample)
+                            except json.JSONDecodeError:
+                                continue
+                else:
+                    with open(path, "r", encoding="utf-8") as f:
+                        sample = json.load(f)
+                        if isinstance(sample,dict) and "annotations" in sample:
+                            sample = sample["annotations"]
+                        self.samples.extend(sample)
+            except Exception:
+                continue
         print(f"[RLPRDataset] 加载 {len(self.samples):,} 条样本")
 
     def __len__(self):
@@ -333,12 +345,37 @@ class RLAIFVDataset(Dataset):
 
         self.samples = []
         for path in data_paths:
-            with open(path, "r") as f:
-                for line in f:
-                    try:
-                        self.samples.append(json.loads(line.strip()))
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                if "jsonl" in path:
+                    with open(path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                sample = json.loads(line.strip())
+                                if os.path.exists(sample["image"]):
+                                    self.samples.append(sample)
+
+                            except json.JSONDecodeError:
+                                continue
+                else:
+                    with open(path, "r", encoding="utf-8") as f:
+                        sample = json.load(f)
+                        if isinstance(sample, dict) and "annotations" in sample:
+                            sample = sample["annotations"]
+                        sample = [item for item in sample if os.path.exists(item["image"])]
+                        self.samples.extend(sample)
+            except Exception:
+                continue
+
+        valid_samples = []
+        for sample in self.samples:
+            try:
+                with Image.open(sample["image"]) as img:
+                    img.verify()  # 只验证，不加载完整图像
+                valid_samples.append(sample)
+            except Exception:
+                continue
+
+        self.samples = valid_samples
         print(f"[RLAIFVDataset] 加载 {len(self.samples):,} 条偏好样本")
 
     def __len__(self):
@@ -412,3 +449,4 @@ class RLAIFVDataset(Dataset):
             "pixel_values": pixel_values,
             "thinking_mode": thinking_mode,
         }
+

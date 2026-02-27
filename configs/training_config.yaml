@@ -15,8 +15,8 @@ stage1:
   batch_size_per_gpu: 32
   gradient_accumulation_steps: 16  # 有效 batch = 32*16=512 (8 GPU) → BS≈4096
   max_grad_norm: 1.0
-  save_steps: 2000
-  log_steps: 50
+  save_steps: 1
+  log_steps: 5
 
   # 数据配比
   data:
@@ -38,17 +38,20 @@ stage1:
 # ==========================================================
 stage2:
   # 接续 Stage 1 权重
-  projector_checkpoint: "checkpoints/stage1/checkpoint-final/projector.pt"
+  vision_encoder: "raw/models/siglip2-so400m-patch14-384"
+  audio_encoder: "raw/models/whisper-medium"
+  llm: "raw/models/qwen3"
+  projector_checkpoint: "checkpoints/stage1/checkpoint-latest/projector.pt"
 
   # 差异化学习率
   encoder_lr: 1.0e-5
   projector_lr: 5.0e-4
   llm_lr: 1.0e-4
   weight_decay: 0.1
-  warmup_steps: 2000
-  max_steps: 200000
-  batch_size_per_gpu: 4
-  gradient_accumulation_steps: 64  # 有效 BS ≈ 512
+  warmup_steps: 500
+  max_steps: 1000
+  batch_size_per_gpu: 2
+  gradient_accumulation_steps: 4
 
   # OCR 噪声设置
   ocr_noise:
@@ -91,18 +94,21 @@ stage2:
 # Stage 3: 监督微调 (SFT) 配置
 # ==========================================================
 stage3:
-  pretrained_checkpoint: "checkpoints/stage2/checkpoint-final/model.pt"
+  vision_encoder: "raw/models/siglip2-so400m-patch14-384"
+  audio_encoder: "raw/models/whisper-medium"
+  llm: "raw/models/qwen3"
+  pretrained_checkpoint: "checkpoints/stage2/checkpoint-latest/model.pt"
 
   # 超参
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.03
-  total_steps: 30000
+  total_steps: 300
   batch_size_per_gpu: 2
-  gradient_accumulation_steps: 128  # 有效 BS ≈ 512 (16 GPU)
+  gradient_accumulation_steps: 4
   max_grad_norm: 1.0
-  save_steps: 1000
-  log_steps: 50
+  save_steps: 2
+  log_steps: 1
 
   # 思考模式配比
   fast_think_ratio: 0.70     # 70% 快思考样本
@@ -139,6 +145,9 @@ stage3:
 # Stage 4: 强化学习后训练配置
 # ==========================================================
 stage4:
+  vision_encoder: "raw/models/siglip2-so400m-patch14-384"
+  audio_encoder: "raw/models/whisper-medium"
+  llm: "raw/models/qwen3"
   sft_checkpoint: "checkpoints/stage3/sft-checkpoint-final/model.pt"
 
   # GRPO 超参（RLPR）
@@ -152,19 +161,19 @@ stage4:
   dpo_beta: 0.1
 
   # 训练调度
-  total_rl_steps: 3000
+  total_rl_steps: 300
   grpo_dpo_ratio: 0.50         # 50% GRPO, 50% DPO
-  grpo_batch_size: 4           # prompts per GRPO step
-  dpo_batch_size: 8
-  gradient_accumulation_steps: 4
+  grpo_batch_size: 2           # prompts per GRPO step
+  dpo_batch_size: 2
+  gradient_accumulation_steps: 2
   max_grad_norm: 1.0
-  save_steps: 500
-  log_steps: 20
+  save_steps: 5
+  log_steps: 1
 
   # 数据
   data:
-#    rlpr:                      # 可验证推理数据
-#      - "raw/datasetsrl/math_geoqa_300k.jsonl"
+    rlpr:                      # 可验证推理数据
+      - "build_data/chat_stage4/conversation.json"
 #      - "raw/datasetsrl/mathvista_train.jsonl"
 #      - "raw/datasetsrl/code_reasoning_100k.jsonl"
     rlaifv:                    # AI 反馈偏好数据
@@ -175,3 +184,4 @@ stage4:
   gpu_type: "A100-80GB"
   expected_days: 7
   output_dir: "checkpoints/stage4"
+

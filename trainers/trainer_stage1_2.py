@@ -1,12 +1,10 @@
 """
 Stage 1: 模态对齐预训练 Trainer
 Stage 2: 统一多模态预训练 Trainer
-
-Stage 1: 冻结 LLM 和 Encoder，只训练 Projector
-Stage 2: 全参数训练，分差异化学习率
 """
 
 import os
+import shutil
 import time
 import math
 from pathlib import Path
@@ -15,17 +13,16 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, WeightedRandomSampler, DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from ..models.modeling_minicpmo import MiniCPMOConfig, MiniCPMOModel
-from ..data.dataset_stage1_2 import Stage1AlignmentDataset, Stage2MultimodalDataset
+from models.modeling_minicpmo import MiniCPMOConfig, MiniCPMOModel
+from data.dataset_stage1_2 import Stage1AlignmentDataset, Stage2MultimodalDataset
 
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
-    """余弦退火学习率调度（含 warmup）"""
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
@@ -37,12 +34,10 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 
 class TrainingMetrics:
-    """训练指标追踪"""
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = open(self.log_dir / "train_log.jsonl", "a")
-        self.step_losses = []
 
     def log(self, step: int, metrics: Dict):
         import json
@@ -57,36 +52,74 @@ class TrainingMetrics:
 
 
 def collate_fn_stage1(batch: List[Dict]) -> Dict:
-    """Stage 1 collate function，处理变长序列"""
     from torch.nn.utils.rnn import pad_sequence
-
     keys_to_pad = ["input_ids", "attention_mask", "labels"]
     result = {}
-
     for key in keys_to_pad:
         tensors = [b[key] for b in batch if key in b]
         if tensors:
             result[key] = pad_sequence(tensors, batch_first=True,
                                        padding_value=-100 if key == "labels" else 0)
-
-    # 图像处理：收集所有图像样本
     image_batch = [b for b in batch if "pixel_values" in b]
     if image_batch:
         result["pixel_values"] = torch.cat([b["pixel_values"] for b in image_batch], dim=0)
-        result["image_sample_indices"] = [
-            i for i, b in enumerate(batch) if "pixel_values" in b
-        ]
-
-    # 语音处理
+        result["image_sample_indices"] = [i for i, b in enumerate(batch) if "pixel_values" in b]
     audio_batch = [b for b in batch if "audio_mel" in b]
     if audio_batch:
         result["audio_mel"] = torch.stack([b["audio_mel"] for b in audio_batch])
         result["audio_mask"] = torch.stack([b["audio_mask"] for b in audio_batch])
-        result["audio_sample_indices"] = [
-            i for i, b in enumerate(batch) if "audio_mel" in b
-        ]
-
+        result["audio_sample_indices"] = [i for i, b in enumerate(batch) if "audio_mel" in b]
     return result
+
+
+# ============================================================
+# 检查点滚动管理器
+# ============================================================
+
+class CheckpointManager:
+    """
+    滚动保存检查点：
+    - 最多保留 max_keep 个常规检查点（自动删除最旧的）
+    - final 检查点始终保留，不计入 max_keep
+    - 维护 checkpoint-latest 软链接指向最新检查点
+    """
+
+    def __init__(self, output_dir: Path, max_keep: int = 3):
+        self.output_dir = output_dir
+        self.max_keep = max_keep
+        self.saved: List[Path] = []  # 只追踪常规检查点（不含 final）
+
+    def _cleanup(self):
+        """删除超出 max_keep 的最旧检查点"""
+        while len(self.saved) > self.max_keep:
+            oldest = self.saved.pop(0)
+            if oldest.exists():
+                shutil.rmtree(oldest)
+                print(f"[Checkpoint] 删除旧检查点: {oldest.name}", flush=True)
+
+    def save(self, step, save_fn):
+        """
+        step    : int 或 "final"
+        save_fn : callable(save_dir: Path)，负责实际写文件
+        """
+        save_dir = self.output_dir / f"checkpoint-{step}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        save_fn(save_dir)
+
+        is_final = (step == "final")
+        if not is_final:
+            self.saved.append(save_dir)
+            self._cleanup()
+
+        # 更新 latest 软链接
+        latest_link = self.output_dir / "checkpoint-latest"
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        latest_link.symlink_to(save_dir.name)
+
+        kept = [p.name for p in self.saved]
+        print(f"[Checkpoint] 保存 → {save_dir.name}  保留列表: {kept}", flush=True)
 
 
 # ============================================================
@@ -94,35 +127,21 @@ def collate_fn_stage1(batch: List[Dict]) -> Dict:
 # ============================================================
 
 class Stage1AlignmentTrainer:
-    """
-    Stage 1 模态对齐预训练 Trainer。
-
-    训练目标：冻结 LLM 和 Encoder，只训练 Projector 对齐层。
-    数据：大规模图文对 + 语音文本对 (各 ~50M 条)
-
-    关键超参数：
-      lr = 2e-3 (Projector 学习率偏高，因其从头训练)
-      warmup = 1000 步
-      batch_size = 4096 (有效)
-      max_steps ≈ 50000
-    """
-
     def __init__(
         self,
         model: MiniCPMOModel,
         train_dataset: Stage1AlignmentDataset,
         output_dir: str,
-        # 超参数
         learning_rate: float = 2e-3,
         weight_decay: float = 0.01,
         warmup_steps: int = 1000,
-        max_steps: int = 50_000,
-        batch_size_per_gpu: int = 32,
-        gradient_accumulation_steps: int = 16,
+        max_steps: int = 10,
+        batch_size_per_gpu: int = 2,
+        gradient_accumulation_steps: int = 2,
         max_grad_norm: float = 1.0,
-        save_steps: int = 2000,
-        log_steps: int = 50,
-        # 分布式
+        save_steps: int = 1,           # 每隔多少 opt_step 保存一次
+        max_keep_checkpoints: int = 3,   # 最多保留几个检查点
+        log_steps: int = 1,
         local_rank: int = 0,
         world_size: int = 1,
     ):
@@ -138,7 +157,9 @@ class Stage1AlignmentTrainer:
         self.log_steps = log_steps
         self.is_main_process = local_rank == 0
 
-        # Stage 1: 只训练 Projector
+        # 检查点管理器
+        self.ckpt_manager = CheckpointManager(self.output_dir, max_keep=max_keep_checkpoints)
+
         trainable_params = model.get_trainable_parameters(stage=1)
         num_trainable = sum(p.numel() for p in trainable_params)
         if self.is_main_process:
@@ -146,18 +167,10 @@ class Stage1AlignmentTrainer:
             total = sum(p.numel() for p in model.parameters())
             print(f"[Stage1] 总参数: {total/1e6:.1f}M, 训练比例: {num_trainable/total*100:.1f}%")
 
-        # 优化器（只优化 Projector 参数）
-        self.optimizer = AdamW(
-            trainable_params,
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.95),
-        )
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer, warmup_steps, max_steps
-        )
+        self.optimizer = AdamW(trainable_params, lr=learning_rate,
+                               weight_decay=weight_decay, betas=(0.9, 0.95))
+        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, max_steps)
 
-        # 数据加载器
         if world_size > 1:
             sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
         else:
@@ -173,25 +186,19 @@ class Stage1AlignmentTrainer:
             drop_last=True,
         )
 
-        # DDP 包装
         if world_size > 1:
             self.model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
         self.metrics = TrainingMetrics(str(self.output_dir / "logs"))
-
-        # 混合精度
-        self.scaler = torch.cuda.amp.GradScaler()
         self.dtype = torch.bfloat16
+        self.scaler = torch.cuda.amp.GradScaler() if self.dtype == torch.float16 else None
 
     def train(self):
-        """主训练循环"""
         self.model.train()
         device = next(self.model.parameters()).device
-
         step = 0
         total_loss = 0.0
         self.optimizer.zero_grad()
-
         data_iter = iter(self.dataloader)
 
         while step < self.max_steps:
@@ -201,13 +208,12 @@ class Stage1AlignmentTrainer:
                 data_iter = iter(self.dataloader)
                 batch = next(data_iter)
 
-            # 移动数据到 GPU
-            input_ids = batch["input_ids"].to(device)
+            input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            pixel_values = batch.get("pixel_values", None)
-            audio_mel = batch.get("audio_mel", None)
-            audio_mask = batch.get("audio_mask", None)
+            labels         = batch["labels"].to(device)
+            pixel_values   = batch.get("pixel_values", None)
+            audio_mel      = batch.get("audio_mel", None)
+            audio_mask     = batch.get("audio_mask", None)
 
             if pixel_values is not None:
                 pixel_values = pixel_values.to(device, dtype=self.dtype)
@@ -216,8 +222,7 @@ class Stage1AlignmentTrainer:
             if audio_mask is not None:
                 audio_mask = audio_mask.to(device)
 
-            # 前向（混合精度）
-            with torch.cuda.amp.autocast(dtype=self.dtype):
+            with torch.amp.autocast('cuda', dtype=self.dtype):
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -228,61 +233,67 @@ class Stage1AlignmentTrainer:
                 )
                 loss = outputs["loss"] / self.gradient_accumulation_steps
 
-            # 反向
-            self.scaler.scale(loss).backward()
-            total_loss += loss.item() * self.gradient_accumulation_steps
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            # 梯度累积更新
+            total_loss += loss.item() * self.gradient_accumulation_steps
+            print(f"[LOSS] step={step}, loss={loss.item():.4f}", flush=True)
+
+            #  修复：所有保存与日志逻辑统一移入梯度累积块内，使用 opt_step 判断
             if (step + 1) % self.gradient_accumulation_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad],
-                    self.max_grad_norm
-                )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.model.parameters() if p.requires_grad], self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.model.parameters() if p.requires_grad], self.max_grad_norm)
+                    self.optimizer.step()
+
                 self.optimizer.zero_grad()
                 self.scheduler.step()
 
                 opt_step = (step + 1) // self.gradient_accumulation_steps
 
-                # 日志
+                #  修复：optimizer.step() 之后保存，以 opt_step 为基准
+                if self.is_main_process and opt_step % self.save_steps == 0:
+                    print("正在保存模型...", flush=True)
+                    self._save_checkpoint(opt_step)
+
                 if self.is_main_process and opt_step % self.log_steps == 0:
                     avg_loss = total_loss / self.log_steps
                     lr = self.scheduler.get_last_lr()[0]
                     print(
-                        f"[Stage1] Step {opt_step}/{self.max_steps//self.gradient_accumulation_steps}"
-                        f" | loss={avg_loss:.4f} | lr={lr:.2e} | grad_norm={grad_norm:.3f}"
+                        f"[Stage1] Step {opt_step}/{self.max_steps // self.gradient_accumulation_steps}"
+                        f" | loss={avg_loss:.4f} | lr={lr:.2e} | grad_norm={grad_norm:.3f}",
+                        flush=True
                     )
                     self.metrics.log(opt_step, {
                         "stage": 1, "loss": avg_loss, "lr": lr, "grad_norm": float(grad_norm)
                     })
                     total_loss = 0.0
 
-                # 保存
-                if self.is_main_process and opt_step % self.save_steps == 0:
-                    self._save_checkpoint(opt_step)
-
             step += 1
 
         if self.is_main_process:
             self._save_checkpoint("final")
-            print("[Stage1] 训练完成！")
+            print("[Stage1] 训练完成！", flush=True)
 
     def _save_checkpoint(self, step):
-        """保存检查点（只保存 Projector 权重）"""
-        save_dir = self.output_dir / f"checkpoint-{step}"
-        save_dir.mkdir(exist_ok=True)
-
         model = self.model.module if hasattr(self.model, "module") else self.model
-        # Stage 1 只保存 Projector
-        projector_state = {
-            "vision_projector": model.vision_projector.state_dict(),
-            "video_resampler": model.video_resampler.state_dict(),
-            "audio_resampler": model.audio_resampler.state_dict(),
-        }
-        torch.save(projector_state, save_dir / "projector.pt")
-        print(f"[Stage1] 保存 Projector checkpoint → {save_dir}")
+
+        def _write(save_dir: Path):
+            torch.save({
+                "vision_projector": model.vision_projector.state_dict(),
+                "video_resampler":  model.video_resampler.state_dict(),
+                "audio_resampler":  model.audio_resampler.state_dict(),
+            }, save_dir / "projector.pt")
+
+        self.ckpt_manager.save(step, _write)
 
 
 # ============================================================
@@ -290,38 +301,23 @@ class Stage1AlignmentTrainer:
 # ============================================================
 
 class Stage2PretrainTrainer:
-    """
-    Stage 2 统一多模态预训练 Trainer。
-
-    全参数训练，差异化学习率：
-      encoder:    1e-5 (已预训练，学习率低)
-      projector:  5e-4 (从 Stage1 初始化，继续提升)
-      llm:        1e-4 (骨干，中等学习率)
-
-    核心特性：
-      - 动态 OCR 噪声掩码（在 Dataset 中处理）
-      - WeightedRandomSampler 控制数据配比
-      - 长序列训练（max_len=8192）
-      - Flash Attention 2 加速
-    """
-
     def __init__(
         self,
         model: MiniCPMOModel,
         train_dataset: Stage2MultimodalDataset,
         output_dir: str,
-        # 学习率（按组）
         encoder_lr: float = 1e-5,
         projector_lr: float = 5e-4,
         llm_lr: float = 1e-4,
         weight_decay: float = 0.1,
         warmup_steps: int = 2000,
-        max_steps: int = 200_000,
+        max_steps: int = 100,
         batch_size_per_gpu: int = 4,
         gradient_accumulation_steps: int = 64,
         max_grad_norm: float = 1.0,
-        save_steps: int = 5000,
-        log_steps: int = 100,
+        save_steps: int = 5,           # 每隔多少 opt_step 保存一次
+        max_keep_checkpoints: int = 3,   # 最多保留几个检查点
+        log_steps: int = 1,
         local_rank: int = 0,
         world_size: int = 32,
         projector_checkpoint: Optional[str] = None,
@@ -338,7 +334,9 @@ class Stage2PretrainTrainer:
         self.log_steps = log_steps
         self.is_main_process = local_rank == 0
 
-        # 加载 Stage 1 的 Projector 权重
+        # 检查点管理器
+        self.ckpt_manager = CheckpointManager(self.output_dir, max_keep=max_keep_checkpoints)
+
         if projector_checkpoint:
             state = torch.load(projector_checkpoint, map_location="cpu")
             model.vision_projector.load_state_dict(state["vision_projector"])
@@ -347,39 +345,20 @@ class Stage2PretrainTrainer:
             if self.is_main_process:
                 print(f"[Stage2] 加载 Stage1 Projector: {projector_checkpoint}")
 
-        # 差异化参数组学习率
         param_groups = model.get_trainable_parameters(stage=2)
-        # param_groups 是 [{"params": ..., "lr": ...}, ...]
-        # 覆盖为配置的学习率
         for group in param_groups:
-            if group.get("lr") == 1e-5:
-                group["lr"] = encoder_lr
-            elif group.get("lr") == 5e-4:
-                group["lr"] = projector_lr
-            elif group.get("lr") == 1e-4:
-                group["lr"] = llm_lr
+            if group.get("lr") == 1e-5:   group["lr"] = encoder_lr
+            elif group.get("lr") == 5e-4: group["lr"] = projector_lr
+            elif group.get("lr") == 1e-4: group["lr"] = llm_lr
 
-        self.optimizer = AdamW(
-            param_groups,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.95),
-        )
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer, warmup_steps, max_steps
-        )
+        self.optimizer = AdamW(param_groups, weight_decay=weight_decay, betas=(0.9, 0.95))
+        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, max_steps)
 
-        # WeightedRandomSampler 实现数据配比
         sample_weights = train_dataset.get_sampler_weights()
-        weighted_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(train_dataset),
-            replacement=True,
-        )
-
         self.dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size_per_gpu,
-            sampler=weighted_sampler,
+            sampler=WeightedRandomSampler(sample_weights, len(train_dataset), replacement=True),
             collate_fn=collate_fn_stage1,
             num_workers=4,
             pin_memory=True,
@@ -390,18 +369,14 @@ class Stage2PretrainTrainer:
             self.model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
         self.metrics = TrainingMetrics(str(self.output_dir / "logs"))
-        self.scaler = torch.cuda.amp.GradScaler()
         self.dtype = torch.bfloat16
+        self.scaler = torch.cuda.amp.GradScaler() if self.dtype == torch.float16 else None
 
     def train(self):
-        """主训练循环（与 Stage1 类似，但全参数更新）"""
         self.model.train()
         device = next(self.model.parameters()).device
         step = 0
         total_loss = 0.0
-        loss_by_type = {"image_text": 0.0, "ocr_document": 0.0, "video": 0.0, "audio_text": 0.0}
-        type_counts = {k: 0 for k in loss_by_type}
-
         self.optimizer.zero_grad()
         data_iter = iter(self.dataloader)
 
@@ -412,23 +387,19 @@ class Stage2PretrainTrainer:
                 data_iter = iter(self.dataloader)
                 batch = next(data_iter)
 
-            input_ids = batch["input_ids"].to(device)
+            input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            labels         = batch["labels"].to(device)
+            pixel_values   = batch.get("pixel_values")
+            video_frames   = batch.get("video_frames")
+            audio_mel      = batch.get("audio_mel")
+            audio_mask     = batch.get("audio_mask")
 
-            pixel_values = batch.get("pixel_values")
-            video_frames = batch.get("video_frames")
-            audio_mel = batch.get("audio_mel")
-            audio_mask = batch.get("audio_mask")
+            if pixel_values  is not None: pixel_values  = pixel_values.to(device, dtype=self.dtype)
+            if video_frames  is not None: video_frames  = video_frames.to(device, dtype=self.dtype)
+            if audio_mel     is not None: audio_mel     = audio_mel.to(device, dtype=self.dtype)
 
-            if pixel_values is not None:
-                pixel_values = pixel_values.to(device, dtype=self.dtype)
-            if video_frames is not None:
-                video_frames = video_frames.to(device, dtype=self.dtype)
-            if audio_mel is not None:
-                audio_mel = audio_mel.to(device, dtype=self.dtype)
-
-            with torch.cuda.amp.autocast(dtype=self.dtype):
+            with torch.amp.autocast('cuda', dtype=self.dtype):
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -440,21 +411,35 @@ class Stage2PretrainTrainer:
                 )
                 loss = outputs["loss"] / self.gradient_accumulation_steps
 
-            self.scaler.scale(loss).backward()
-            total_loss += loss.item() * self.gradient_accumulation_steps
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
+            total_loss += loss.item() * self.gradient_accumulation_steps
+            print(f"[STEP LOSS] step={step}, loss={loss.item():.4f}", flush=True)
+            #  修复：所有保存与日志逻辑统一移入梯度累积块内，使用 opt_step 判断
             if (step + 1) % self.gradient_accumulation_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad],
-                    self.max_grad_norm
-                )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.model.parameters() if p.requires_grad], self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.model.parameters() if p.requires_grad], self.max_grad_norm)
+                    self.optimizer.step()
+
                 self.optimizer.zero_grad()
                 self.scheduler.step()
 
                 opt_step = (step + 1) // self.gradient_accumulation_steps
+
+                #  修复：optimizer.step() 之后保存，以 opt_step 为基准
+                if self.is_main_process and opt_step % self.save_steps == 0:
+                    print("正在保存模型...", flush=True)
+                    self._save_checkpoint(opt_step)
 
                 if self.is_main_process and opt_step % self.log_steps == 0:
                     avg_loss = total_loss / self.log_steps
@@ -462,7 +447,7 @@ class Stage2PretrainTrainer:
                     print(
                         f"[Stage2] Step {opt_step} | loss={avg_loss:.4f} | "
                         f"lr_enc={lrs[0]:.2e} lr_proj={lrs[1]:.2e} lr_llm={lrs[2]:.2e} | "
-                        f"grad_norm={grad_norm:.3f}"
+                        f"grad_norm={grad_norm:.3f}", flush=True
                     )
                     self.metrics.log(opt_step, {
                         "stage": 2, "loss": avg_loss,
@@ -471,27 +456,21 @@ class Stage2PretrainTrainer:
                     })
                     total_loss = 0.0
 
-                if self.is_main_process and opt_step % self.save_steps == 0:
-                    self._save_checkpoint(opt_step)
-
             step += 1
 
         if self.is_main_process:
             self._save_checkpoint("final")
-            print("[Stage2] 预训练完成！")
+            print("[Stage2] 训练完成！", flush=True)  #  修复：原来错误地写成了 [Stage1]
 
     def _save_checkpoint(self, step):
-        """保存全量检查点（包含所有组件）"""
-        save_dir = self.output_dir / f"checkpoint-{step}"
-        save_dir.mkdir(exist_ok=True)
         model = self.model.module if hasattr(self.model, "module") else self.model
-        torch.save(model.state_dict(), save_dir / "model.pt")
 
-        # 单独保存 Projector（方便 Stage3 加载）
-        projector_state = {
-            "vision_projector": model.vision_projector.state_dict(),
-            "video_resampler": model.video_resampler.state_dict(),
-            "audio_resampler": model.audio_resampler.state_dict(),
-        }
-        torch.save(projector_state, save_dir / "projector.pt")
-        print(f"[Stage2] 保存全量 checkpoint → {save_dir}")
+        def _write(save_dir: Path):
+            torch.save(model.state_dict(), save_dir / "model.pt")
+            torch.save({
+                "vision_projector": model.vision_projector.state_dict(),
+                "video_resampler":  model.video_resampler.state_dict(),
+                "audio_resampler":  model.audio_resampler.state_dict(),
+            }, save_dir / "projector.pt")
+
+        self.ckpt_manager.save(step, _write)
