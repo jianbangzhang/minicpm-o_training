@@ -4,51 +4,104 @@
 
 ```
 minicpmo_training/
-├── configs/                    # 各阶段训练配置
-│   ├── stage1_align.yaml       # Stage 1: 模态对齐预训练
-│   ├── stage2_pretrain.yaml    # Stage 2: 多模态统一预训练
-│   ├── stage3_sft.yaml         # Stage 3: 监督微调
-│   └── stage4_rl.yaml          # Stage 4: 强化学习后训练
-├── data/
-│   ├── dataset_stage1.py       # Stage 1 数据集 (图文对 + 语音文本对)
-│   ├── dataset_stage2.py       # Stage 2 数据集 (OCR噪声掩码 + 视频 + 多模态)
-│   ├── dataset_stage3.py       # Stage 3 SFT 数据集 (两阶段指令数据)
-│   ├── dataset_stage4.py       # Stage 4 RL 数据集 (偏好数据 + 可验证推理)
-│   └── data_utils.py           # 数据处理工具函数
-├── models/
-│   ├── modeling_minicpmo.py    # 完整模型架构 (对齐官方结构)
-│   └── projector.py            # 视觉/语音 Projector 模块
-├── trainers/
-│   ├── trainer_stage1.py       # Stage 1 Projector对齐训练器
-│   ├── trainer_stage2.py       # Stage 2 全参数预训练器
-│   ├── trainer_stage3.py       # Stage 3 SFT训练器 (两阶段数据调度)
-│   └── trainer_stage4.py       # Stage 4 GRPO + DPO 训练器
-├── utils/
-│   ├── ocr_noise.py            # 动态OCR噪声掩码工具
-│   ├── video_processor.py      # 视频帧压缩 (6帧→64tokens)
-│   ├── audio_processor.py      # 音频预处理与特征提取
-│   └── reward_functions.py     # RL奖励函数 (RLPR + RLAIF-V)
-└── scripts/
-    ├── run_stage1.sh
-    ├── run_stage2.sh
-    ├── run_stage3.sh
-    └── run_stage4.sh
+├── README.md
+├── build_data
+│   ├── audio_text
+│   │   ├── G00126S1001.txt
+│   │   ├── G00126S1001.wav
+│   │   └── audio_text.json
+│   ├── audio_text.py
+│   ├── chat_stage3
+│   │   └── chat.json
+│   ├── chat_stage4
+│   │   ├── conversation.json
+│   │   └── data.json
+│   ├── create_stage3_dataset.py
+│   ├── create_stage4_dataset.py
+│   ├── image_text
+│   │   ├── Train_GCC-training_truncated.tsv
+│   │   ├── coco_dataset
+│   │   │   ├── coco_download.py
+│   │   │   └── download.py
+│   │   ├── data.txt
+│   │   ├── image_text.json
+│   │   └── images
+│   │       ├── 00000000.jpg
+│   │       └── 00000018.jpg
+│   ├── image_text.py
+│   ├── ocr_data
+│   │   ├── Challenge4_Test_Task1_GT
+│   │   │   ├── gt_img_1.txt
+│   │   │   └── 00001.jpg
+│   │   └── videos
+│   └── visual_text.py
+├── checkpoints
+│   ├── stage1
+│   ├── stage2
+│   ├── stage3
+│   └── stage4
+├── configs
+│   ├── __init__.py
+│   ├── training_config.yaml
+│   └── training_config2.yaml
+├── data
+│   ├── __init__.py
+│   ├── dataset_stage1_2.py
+│   ├── dataset_stage3.py
+│   └── dataset_stage4.py
+├── doc
+│   ├── MiniCPM-o_4.5_训练方案设计.docx
+│   └── MiniCPM_o_4_5_训练数据方案.docx
+├── models
+│   ├── __init__.py
+│   └── modeling_minicpmo.py
+├── raw
+│   ├── datasets
+│   │   ├── stage1
+│   │   │   ├── example.json
+│   │   │   └── train_data.json
+│   │   ├── stage2
+│   │   │   ├── example.json
+│   │   │   └── train_data.json
+│   │   ├── stage3
+│   │   │   └── example.json
+│   │   └── stage4
+│   │       └── example.json
+│   └── models
+│       ├── download_cosyvoice2.sh
+│       ├── download_qwen3-0.6b.sh
+│       ├── download_siglip2-so400m-patch14-384.sh
+│       └── download_whisper_medium.sh
+├── requirements.txt
+├── scripts
+│   ├── __init__.py
+│   └── run_stage.sh
+├── trainer_api.py
+├── trainers
+│   ├── __init__.py
+│   ├── trainer_stage1_2.py
+│   ├── trainer_stage3.py
+│   └── trainer_stage4.py
+└── utils
+    ├── __init__.py
+    ├── ocr_noise.py
+    └── video_audio_processor.py
 ```
 
 ## 快速启动
 
 ```bash
-# Stage 1: 模态对齐 (8×A100, ~5天)
+# Stage 1: 模态对齐
 bash scripts/run_stage.sh
 
-# Stage 2: 多模态预训练 (32×A100, ~3周)
-bash scripts/run_stage2.sh
+# Stage 2: 多模态预训练
+bash scripts/run_stage.sh
 
-# Stage 3: 监督微调 (16×A100, ~2周)
-bash scripts/run_stage3.sh
+# Stage 3: 监督微调
+bash scripts/run_stage.sh
 
-# Stage 4: 强化学习后训练 (16×A100, ~7天)
-bash scripts/run_stage4.sh
+# Stage 4: 强化学习后训练
+bash scripts/run_stage.sh
 ```
 
 ## 架构概述
